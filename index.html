@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Marketplace Menu</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <div class="window">
+      <div class="window__header">
+        <div class="window__title">Marketplace Menu</div>
+        <div class="window__search">
+          <input id="searchInput" type="text" placeholder="Поиск по названию..." />
+        </div>
+      </div>
+
+      <div class="tabs">
+        <button class="tab tab--active" data-tab="favorites">Избраное</button>
+        <button class="tab" data-tab="library">Библиотека</button>
+      </div>
+
+      <div class="content">
+        <div id="favoritesView" class="view view--active">
+          <div id="favoritesGrid" class="items-grid"></div>
+          <div id="favoritesEmpty" class="empty-state">В избраном пока нет предметов</div>
+        </div>
+
+        <div id="libraryView" class="view">
+          <div id="libraryGrid" class="items-grid"></div>
+          <div id="libraryEmpty" class="empty-state">Список предметов пуст</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
