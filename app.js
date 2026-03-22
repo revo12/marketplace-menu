@@ -1,35 +1,13 @@
 const CONFIG = {
-  glistUrl: 'https://gist.githubusercontent.com/revo12/2a9c956f1d3ff3c9af769dc5d532e339/raw/8dd5c3ef679092216bb3b9ddfab2926dc6bd2e85/itemid',
+  glistUrl:
+    'https://gist.githubusercontent.com/revo12/2a9c956f1d3ff3c9af769dc5d532e339/raw/8dd5c3ef679092216bb3b9ddfab2926dc6bd2e85/itemid',
+
+  metaUrl: './items-meta.json',
 
   imageUrlById: (itemId) =>
     `https://cdn-eu.majestic-files.net/public/master/static/img/inventory/items/${itemId}.webp`,
 
-  wikiUrlByItem: (wikiSlug, itemId) =>
-    `https://wiki.majestic-rp.ru/ru/items/${wikiSlug}/${itemId}`,
-
-  favoritesStorageKey: 'marketplace_menu_favorites',
-
-  groupKeyToWikiSlug: {
-    food: 'food',
-    tool: 'tools',
-    fish: 'fish',
-    equipment: 'equipment',
-    alcohol: 'alcohol',
-    ammunition: 'ammunition',
-    medical: 'medicine',
-    auto_parts: 'auto-parts',
-    misc: 'misc',
-    consumables: 'consumables',
-    facilities: 'infrastructure',
-    documents: 'documents',
-    books: 'books',
-    personals: 'personal-items',
-    products: 'products',
-    agriculture: 'agriculture',
-    drugs: 'ingredients',
-    armor: 'armor',
-    others: 'misc'
-  }
+  favoritesStorageKey: 'marketplace_menu_favorites'
 };
 
 const state = {
@@ -37,7 +15,7 @@ const state = {
   search: '',
   items: [],
   favorites: new Set(loadFavorites()),
-  loadingNames: false
+  metaMap: {}
 };
 
 const els = {
@@ -55,13 +33,13 @@ init();
 
 async function init() {
   bindEvents();
+  await loadMeta();
   await loadItems();
   render();
-  resolveAllNamesInBackground();
 }
 
 function bindEvents() {
-  els.tabs.forEach(tab => {
+  els.tabs.forEach((tab) => {
     tab.addEventListener('click', () => {
       state.activeTab = tab.dataset.tab;
       updateTabs();
@@ -75,13 +53,15 @@ function bindEvents() {
   });
 }
 
-function updateTabs() {
-  els.tabs.forEach(tab => {
-    tab.classList.toggle('tab--active', tab.dataset.tab === state.activeTab);
-  });
-
-  els.favoritesView.classList.toggle('view--active', state.activeTab === 'favorites');
-  els.libraryView.classList.toggle('view--active', state.activeTab === 'library');
+async function loadMeta() {
+  try {
+    const response = await fetch(CONFIG.metaUrl);
+    const raw = await response.json();
+    state.metaMap = raw || {};
+  } catch (error) {
+    console.error('Failed to load items-meta.json:', error);
+    state.metaMap = {};
+  }
 }
 
 async function loadItems() {
@@ -106,17 +86,14 @@ function normalizeGlist(raw) {
       if (Number.isNaN(id)) return;
 
       if (!resultMap.has(id)) {
-        const wikiSlug = CONFIG.groupKeyToWikiSlug[categoryName] || 'misc';
+        const meta = state.metaMap[String(id)] || {};
 
         resultMap.set(id, {
           id,
-          name: `Item ${id}`,
-          price: '',
+          name: meta.name || `Item ${id}`,
+          price: meta.price || '',
           category: categoryName,
-          wikiSlug,
-          wikiUrl: CONFIG.wikiUrlByItem(wikiSlug, id),
-          image: CONFIG.imageUrlById(id),
-          resolved: false
+          image: CONFIG.imageUrlById(id)
         });
       }
     });
@@ -125,80 +102,13 @@ function normalizeGlist(raw) {
   return Array.from(resultMap.values()).sort((a, b) => a.id - b.id);
 }
 
-async function resolveAllNamesInBackground() {
-  if (state.loadingNames) return;
-  state.loadingNames = true;
+function updateTabs() {
+  els.tabs.forEach((tab) => {
+    tab.classList.toggle('tab--active', tab.dataset.tab === state.activeTab);
+  });
 
-  for (let i = 0; i < state.items.length; i++) {
-    const item = state.items[i];
-
-    if (item.resolved) continue;
-
-    try {
-      const resolvedName = await resolveItemName(item.wikiUrl);
-      if (resolvedName) {
-        item.name = resolvedName;
-      }
-    } catch (error) {
-      console.error('Failed to resolve item name:', item.id, error);
-    }
-
-    item.resolved = true;
-
-    if (i % 8 === 0 || i === state.items.length - 1) {
-      render();
-    }
-  }
-
-  state.loadingNames = false;
-  render();
-}
-
-async function resolveItemName(url) {
-  const response = await fetch(url);
-  const html = await response.text();
-
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(html, 'text/html');
-
-  const h1 = doc.querySelector('h1');
-  if (h1) {
-    const value = normalizeText(h1.textContent);
-    if (value) return value;
-  }
-
-  const title = doc.querySelector('title');
-  if (title) {
-    const value = normalizeText(title.textContent)
-      .replace(/ · .*$/i, '')
-      .replace(/ \| .*$/i, '')
-      .trim();
-
-    if (value) return value;
-  }
-
-  const spans = Array.from(doc.querySelectorAll('span'));
-  const backNode = spans.find(node => normalizeText(node.textContent) === 'Вернуться к списку');
-
-  if (backNode) {
-    const next =
-      backNode.parentElement?.nextElementSibling ||
-      backNode.closest('*')?.nextElementSibling;
-
-    if (next) {
-      const value = normalizeText(next.textContent);
-      if (value) return value;
-    }
-  }
-
-  return null;
-}
-
-function normalizeText(value) {
-  return String(value || '')
-    .replace(/\s+/g, ' ')
-    .replace(/\u00A0/g, ' ')
-    .trim();
+  els.favoritesView.classList.toggle('view--active', state.activeTab === 'favorites');
+  els.libraryView.classList.toggle('view--active', state.activeTab === 'library');
 }
 
 function loadFavorites() {
@@ -231,13 +141,13 @@ function toggleFavorite(itemId) {
 }
 
 function getFilteredItems() {
-  const bySearch = state.items.filter(item =>
+  const bySearch = state.items.filter((item) =>
     item.name.toLowerCase().includes(state.search) ||
     String(item.id).includes(state.search)
   );
 
   if (state.activeTab === 'favorites') {
-    return bySearch.filter(item => state.favorites.has(item.id));
+    return bySearch.filter((item) => state.favorites.has(item.id));
   }
 
   return bySearch;
@@ -258,7 +168,7 @@ function render() {
 }
 
 function renderGrid(container, items) {
-  container.innerHTML = items.map(item => {
+  container.innerHTML = items.map((item) => {
     const active = state.favorites.has(item.id);
 
     return `
@@ -287,7 +197,7 @@ function renderGrid(container, items) {
     `;
   }).join('');
 
-  container.querySelectorAll('[data-favorite-id]').forEach(button => {
+  container.querySelectorAll('[data-favorite-id]').forEach((button) => {
     button.addEventListener('click', () => {
       const id = Number(button.dataset.favoriteId);
       toggleFavorite(id);
