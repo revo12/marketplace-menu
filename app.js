@@ -2,26 +2,26 @@ const FIREBASE_DB_URL = 'https://mar-73-default-rtdb.europe-west1.firebasedataba
 const GLIST_URL = 'https://gist.githubusercontent.com/revo12/2a9c956f1d3ff3c9af769dc5d532e339/raw/8dd5c3ef679092216bb3b9ddfab2926dc6bd2e85/itemid';
 const FAVORITES_STORAGE_KEY = 'marketplace_menu_favorites';
 
-const GROUP_KEY_TO_WIKI_SLUG = {
-  food: 'food',
-  tool: 'tools',
-  fish: 'fish',
-  equipment: 'equipment',
-  alcohol: 'alcohol',
-  ammunition: 'ammunition',
-  medical: 'medicine',
-  auto_parts: 'auto-parts',
-  misc: 'misc',
-  consumables: 'consumables',
-  facilities: 'facilities',
-  documents: 'documents',
-  books: 'books',
-  personals: 'personal-items',
-  products: 'products',
-  agriculture: 'agriculture',
-  drugs: 'ingredients',
-  armor: 'armor',
-  others: 'others'
+const GROUP_KEY_TO_WIKI_SLUGS = {
+  food: ['food'],
+  tool: ['tools', 'tool'],
+  fish: ['fish'],
+  equipment: ['equipment'],
+  alcohol: ['alcohol'],
+  ammunition: ['ammunition'],
+  medical: ['medicine', 'medical'],
+  auto_parts: ['auto-parts', 'auto_parts', 'auto-parts'],
+  misc: ['misc'],
+  consumables: ['consumables'],
+  facilities: ['facilities', 'infrastructure'],
+  documents: ['documents'],
+  books: ['books'],
+  personals: ['personal-items', 'personals', 'personal'],
+  products: ['products'],
+  agriculture: ['agriculture'],
+  drugs: ['ingredients', 'drugs'],
+  armor: ['armor'],
+  others: ['others', 'misc']
 };
 
 const state = {
@@ -31,7 +31,8 @@ const state = {
   favorites: new Set(loadFavorites()),
   categoryByItemId: {},
   firebaseCatalog: {},
-  wikiCategoryCache: {}
+  wikiCategoryCache: {},
+  resolveInProgress: false
 };
 
 const els = {
@@ -188,50 +189,27 @@ function mergeCatalog(baseItems, firebaseCatalog) {
 }
 
 async function fillMissingInfo() {
-  const missing = state.items.filter((item) => !item.name || item.name.trim() === '');
+  if (state.resolveInProgress) return;
+  state.resolveInProgress = true;
 
-  if (!missing.length) {
-    setStatus(`Firebase заполнен. Предметов: ${state.items.length}`);
-    return;
-  }
+  try {
+    const missing = state.items.filter((item) => !item.name || item.name.trim() === '');
 
-  setStatus(`Не хватает данных по ${missing.length} предметам. Начинаю парсинг...`);
+    if (!missing.length) {
+      setStatus(`Firebase заполнен. Предметов: ${state.items.length}`);
+      return;
+    }
 
-  const batchSize = 25;
-  let processed = 0;
+    setStatus(`Не хватает данных по ${missing.length} предметам. Начинаю парсинг...`);
 
-  for (let start = 0; start < missing.length; start += batchSize) {
-    const batch = missing.slice(start, start + batchSize);
+    let processed = 0;
 
-    await Promise.all(batch.map(async (item) => {
+    for (const item of missing) {
       try {
-        const categoryKey = item.category || state.categoryByItemId[item.itemId] || 'misc';
-        const wikiSlug = GROUP_KEY_TO_WIKI_SLUG[categoryKey] || 'misc';
+        const resolved = await resolveItemName(item);
 
-        let resolvedName = '';
-
-        try {
-          const namesMap = await fetchCategoryItemsMap(wikiSlug);
-          resolvedName = namesMap[item.itemId] || '';
-        } catch (e) {}
-
-        if (!resolvedName) {
-          try {
-            const wikiUrl = `https://wiki.majestic-rp.ru/ru/items/${wikiSlug}/${item.itemId}`;
-            resolvedName = await fetchDirectItemName(wikiUrl);
-          } catch (e) {}
-        }
-
-        if (!resolvedName) {
-          try {
-            const wikiUrl = `https://wiki.majestic-rp.ru/en/items/${wikiSlug}/${item.itemId}`;
-            resolvedName = await fetchDirectItemName(wikiUrl);
-          } catch (e) {}
-        }
-
-        if (resolvedName) {
-          item.category = categoryKey;
-          item.name = resolvedName;
+        if (resolved) {
+          item.name = resolved;
           item.price = normalizePrice(item.price, 1);
           item.image = item.image || buildDefaultImage(item.itemId);
           item.updatedAt = Date.now();
@@ -241,56 +219,119 @@ async function fillMissingInfo() {
           item.name = `Предмет #${item.itemId}`;
         }
       } catch (error) {
-        console.warn('Failed to resolve item:', item.itemId, error);
+        console.warn('[resolve-fail]', item.itemId, error);
         item.name = item.name || `Предмет #${item.itemId}`;
       }
-    }));
 
-    processed += batch.length;
-    setStatus(`Парсинг и сохранение: ${processed}/${missing.length}`);
+      processed++;
+
+      if (processed % 10 === 0 || processed === missing.length) {
+        setStatus(`Парсинг и сохранение: ${processed}/${missing.length}`);
+        render();
+      }
+    }
+
+    setStatus(`Синхронизация завершена. Предметов: ${state.items.length}`);
     render();
+  } finally {
+    state.resolveInProgress = false;
   }
-
-  setStatus(`Синхронизация завершена. Предметов: ${state.items.length}`);
-  render();
 }
 
-async function fetchCategoryItemsMap(wikiSlug) {
-  if (state.wikiCategoryCache[wikiSlug]) {
-    return state.wikiCategoryCache[wikiSlug];
-  }
+async function resolveItemName(item) {
+  const categoryKey = item.category || state.categoryByItemId[item.itemId] || 'misc';
+  const slugs = GROUP_KEY_TO_WIKI_SLUGS[categoryKey] || ['misc'];
 
-  const urls = [
-    `https://wiki.majestic-rp.ru/ru/items/${wikiSlug}`,
-    `https://wiki.majestic-rp.ru/en/items/${wikiSlug}`
-  ];
-
-  const result = {};
-
-  for (const url of urls) {
+  for (const slug of slugs) {
+    // 1. category page RU
     try {
-      const response = await fetch(url);
-      if (!response.ok) continue;
+      const ruMap = await fetchCategoryItemsMap('ru', slug);
+      if (ruMap[item.itemId]) {
+        console.log('[resolve-category-ru]', item.itemId, ruMap[item.itemId]);
+        item.category = categoryKey;
+        return ruMap[item.itemId];
+      }
+    } catch (e) {}
 
-      const html = await response.text();
-      const doc = new DOMParser().parseFromString(html, 'text/html');
-      const text = normalizeText(doc.body.textContent || '');
+    // 2. category page EN
+    try {
+      const enMap = await fetchCategoryItemsMap('en', slug);
+      if (enMap[item.itemId]) {
+        console.log('[resolve-category-en]', item.itemId, enMap[item.itemId]);
+        item.category = categoryKey;
+        return enMap[item.itemId];
+      }
+    } catch (e) {}
 
-      const regex = /([A-Za-zА-Яа-я0-9 .,'"()\-+/№#]+?)\s+(\d{1,4})\s+\d+\s*x\s*\d+/g;
-      let match;
+    // 3. direct item page RU
+    try {
+      const ruUrl = `https://wiki.majestic-rp.ru/ru/items/${slug}/${item.itemId}`;
+      const name = await fetchDirectItemName(ruUrl);
+      if (name) {
+        console.log('[resolve-direct-ru]', item.itemId, name);
+        item.category = categoryKey;
+        return name;
+      }
+    } catch (e) {}
 
-      while ((match = regex.exec(text)) !== null) {
-        const name = normalizeText(match[1]);
-        const itemId = Number(match[2]);
-
-        if (!Number.isNaN(itemId) && name && !result[itemId]) {
-          result[itemId] = name;
-        }
+    // 4. direct item page EN
+    try {
+      const enUrl = `https://wiki.majestic-rp.ru/en/items/${slug}/${item.itemId}`;
+      const name = await fetchDirectItemName(enUrl);
+      if (name) {
+        console.log('[resolve-direct-en]', item.itemId, name);
+        item.category = categoryKey;
+        return name;
       }
     } catch (e) {}
   }
 
-  state.wikiCategoryCache[wikiSlug] = result;
+  return '';
+}
+
+async function fetchCategoryItemsMap(lang, wikiSlug) {
+  const cacheKey = `${lang}:${wikiSlug}`;
+  if (state.wikiCategoryCache[cacheKey]) {
+    return state.wikiCategoryCache[cacheKey];
+  }
+
+  const url = `https://wiki.majestic-rp.ru/${lang}/items/${wikiSlug}`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`wiki category HTTP ${response.status}`);
+  }
+
+  const html = await response.text();
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const text = normalizeText(doc.body.textContent || '');
+
+  const result = {};
+
+  // Основной паттерн списка
+  const regex1 = /([A-Za-zА-Яа-я0-9 .,'"()\-+/№#:%]+?)\s+(\d{1,4})\s+\d+\s*x\s*\d+/g;
+  let match1;
+  while ((match1 = regex1.exec(text)) !== null) {
+    const name = normalizeText(match1[1]);
+    const itemId = Number(match1[2]);
+
+    if (!Number.isNaN(itemId) && name && !result[itemId]) {
+      result[itemId] = name;
+    }
+  }
+
+  // Доп. паттерн Name + ID без x
+  const regex2 = /([A-Za-zА-Яа-я0-9 .,'"()\-+/№#:%]+?)\s+(\d{1,4})\s+(Marketplace|kg|g|l|ml)/g;
+  let match2;
+  while ((match2 = regex2.exec(text)) !== null) {
+    const name = normalizeText(match2[1]);
+    const itemId = Number(match2[2]);
+
+    if (!Number.isNaN(itemId) && name && !result[itemId]) {
+      result[itemId] = name;
+    }
+  }
+
+  state.wikiCategoryCache[cacheKey] = result;
   return result;
 }
 
@@ -338,6 +379,8 @@ async function saveItemToFirebase(item) {
     updatedAt: Date.now()
   };
 
+  console.log('[firebase-save-try]', item.itemId, payload);
+
   const response = await fetch(buildDbUrl(`catalog/${item.itemId}`), {
     method: 'PATCH',
     headers: {
@@ -346,9 +389,14 @@ async function saveItemToFirebase(item) {
     body: JSON.stringify(payload)
   });
 
+  console.log('[firebase-save-status]', item.itemId, response.status);
+
   if (!response.ok) {
     throw new Error(`firebase PATCH HTTP ${response.status}`);
   }
+
+  const result = await response.json();
+  console.log('[firebase-save-success]', item.itemId, result);
 }
 
 function normalizeText(value) {
