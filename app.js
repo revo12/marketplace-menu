@@ -2,26 +2,26 @@ const FIREBASE_DB_URL = 'https://mar-73-default-rtdb.europe-west1.firebasedataba
 const GLIST_URL = 'https://gist.githubusercontent.com/revo12/2a9c956f1d3ff3c9af769dc5d532e339/raw/8dd5c3ef679092216bb3b9ddfab2926dc6bd2e85/itemid';
 const FAVORITES_STORAGE_KEY = 'marketplace_menu_favorites';
 
-const GROUP_KEY_TO_WIKI_SLUG = {
-  food: 'food',
-  tool: 'tools',
-  fish: 'fish',
-  equipment: 'equipment',
-  alcohol: 'alcohol',
-  ammunition: 'ammunition',
-  medical: 'medicine',
-  auto_parts: 'auto-parts',
-  misc: 'misc',
-  consumables: 'consumables',
-  facilities: 'facilities',
-  documents: 'documents',
-  books: 'books',
-  personals: 'personal-items',
-  products: 'products',
-  agriculture: 'agriculture',
-  drugs: 'ingredients',
-  armor: 'armor',
-  others: 'others'
+const GROUP_KEY_TO_WIKI_SLUGS = {
+  food: ['food'],
+  tool: ['tools', 'tool'],
+  fish: ['fish'],
+  equipment: ['equipment'],
+  alcohol: ['alcohol'],
+  ammunition: ['ammunition'],
+  medical: ['medicine', 'medical'],
+  auto_parts: ['auto-parts', 'auto_parts'],
+  misc: ['misc'],
+  consumables: ['consumables'],
+  facilities: ['facilities', 'infrastructure'],
+  documents: ['documents'],
+  books: ['books'],
+  personals: ['personal-items', 'personals'],
+  products: ['products'],
+  agriculture: ['agriculture'],
+  drugs: ['ingredients', 'drugs'],
+  armor: ['armor'],
+  others: ['others', 'misc']
 };
 
 const state = {
@@ -29,7 +29,6 @@ const state = {
   search: '',
   items: [],
   favorites: new Set(loadFavorites()),
-  firebaseCatalog: {},
   categoryByItemId: {},
   parseRunning: false
 };
@@ -51,9 +50,7 @@ init();
 
 async function init() {
   bindEvents();
-  await bootstrapCatalog();
-  render();
-  await parseMissingItemsRealtime();
+  await bootstrap();
 }
 
 function bindEvents() {
@@ -74,11 +71,24 @@ function bindEvents() {
 
   if (els.refreshButton) {
     els.refreshButton.addEventListener('click', async () => {
-      await bootstrapCatalog();
-      render();
-      await parseMissingItemsRealtime();
+      await bootstrap();
     });
   }
+}
+
+async function bootstrap() {
+  setStatus('Загрузка glist...');
+  const glistItems = await loadGlistItems();
+
+  setStatus('Чтение Firebase...');
+  const firebaseCatalog = await loadFirebaseCatalog();
+
+  state.items = mergeItems(glistItems, firebaseCatalog);
+
+  render();
+  setStatus(`Список загружен. Предметов: ${state.items.length}`);
+
+  await parseMissingNames();
 }
 
 function buildDbUrl(path) {
@@ -88,41 +98,14 @@ function buildDbUrl(path) {
     : `${FIREBASE_DB_URL}/.json`;
 }
 
-async function bootstrapCatalog() {
-  setStatus('Загрузка glist...');
-  const glist = await loadGlist();
-
-  setStatus('Чтение Firebase...');
-  state.firebaseCatalog = await loadFirebaseCatalog();
-
-  state.items = mergeBaseWithFirebase(glist, state.firebaseCatalog);
-  setStatus(`Синхронизация базы завершена. Предметов: ${state.items.length}`);
-}
-
-async function loadGlist() {
+async function loadGlistItems() {
   const response = await fetch(GLIST_URL);
   if (!response.ok) {
     throw new Error(`glist HTTP ${response.status}`);
   }
 
   const raw = await response.json();
-  return normalizeGlist(raw);
-}
-
-async function loadFirebaseCatalog() {
-  try {
-    const response = await fetch(buildDbUrl('catalog'));
-    if (!response.ok) return {};
-    const raw = await response.json();
-    return raw || {};
-  } catch (error) {
-    console.warn('Firebase unavailable:', error);
-    return {};
-  }
-}
-
-function normalizeGlist(raw) {
-  const result = [];
+  const map = new Map();
   const categoryByItemId = {};
 
   Object.keys(raw || {}).forEach((groupName) => {
@@ -134,33 +117,44 @@ function normalizeGlist(raw) {
 
       categoryByItemId[id] = groupName;
 
-      result.push({
-        itemId: id,
-        category: groupName,
-        name: '',
-        price: 1,
-        image: buildDefaultImage(id),
-        updatedAt: 0
-      });
+      if (!map.has(id)) {
+        map.set(id, {
+          itemId: id,
+          category: groupName,
+          name: '',
+          price: 1,
+          image: buildDefaultImage(id),
+          updatedAt: 0
+        });
+      }
     });
   });
 
   state.categoryByItemId = categoryByItemId;
-
-  const unique = new Map();
-  result.forEach((item) => {
-    if (!unique.has(item.itemId)) {
-      unique.set(item.itemId, item);
-    }
-  });
-
-  return Array.from(unique.values()).sort((a, b) => a.itemId - b.itemId);
+  return Array.from(map.values()).sort((a, b) => a.itemId - b.itemId);
 }
 
-function mergeBaseWithFirebase(baseItems, firebaseCatalog) {
+async function loadFirebaseCatalog() {
+  try {
+    const response = await fetch(buildDbUrl('catalog'));
+    if (!response.ok) {
+      console.warn('[firebase-read-status]', response.status);
+      return {};
+    }
+
+    const raw = await response.json();
+    console.log('[firebase-read-success]', raw);
+    return raw || {};
+  } catch (error) {
+    console.warn('[firebase-read-fail]', error);
+    return {};
+  }
+}
+
+function mergeItems(glistItems, firebaseCatalog) {
   const map = new Map();
 
-  baseItems.forEach((item) => {
+  glistItems.forEach((item) => {
     map.set(item.itemId, { ...item });
   });
 
@@ -183,7 +177,7 @@ function mergeBaseWithFirebase(baseItems, firebaseCatalog) {
       category: row.category || existing.category,
       name: row.name ? String(row.name) : existing.name,
       price: normalizePrice(row.price, existing.price),
-      image: row.image || existing.image,
+      image: existing.image,
       updatedAt: Number(row.updatedAt || existing.updatedAt || 0)
     });
   });
@@ -191,7 +185,7 @@ function mergeBaseWithFirebase(baseItems, firebaseCatalog) {
   return Array.from(map.values()).sort((a, b) => a.itemId - b.itemId);
 }
 
-async function parseMissingItemsRealtime() {
+async function parseMissingNames() {
   if (state.parseRunning) return;
   state.parseRunning = true;
 
@@ -203,52 +197,77 @@ async function parseMissingItemsRealtime() {
       return;
     }
 
-    setStatus(`Не хватает данных по ${missing.length} предметам. Начинаю парсинг...`);
+    let success = 0;
+    let fail = 0;
 
-    let done = 0;
+    setStatus(`Начинаю парсинг: ${missing.length} предметов`);
 
-    for (const item of missing) {
-      const categoryKey = item.category || state.categoryByItemId[item.itemId] || 'misc';
-      const wikiSlug = GROUP_KEY_TO_WIKI_SLUG[categoryKey] || 'misc';
-      const wikiUrl = `https://wiki.majestic-rp.ru/ru/items/${wikiSlug}/${item.itemId}`;
+    for (let i = 0; i < missing.length; i++) {
+      const item = missing[i];
 
       try {
-        const resolvedName = await fetchItemNameFromWiki(wikiUrl);
+        const resolvedName = await resolveNameForItem(item);
 
         if (resolvedName) {
           item.name = resolvedName;
-          item.category = categoryKey;
           item.price = normalizePrice(item.price, 1);
-          item.image = item.image || buildDefaultImage(item.itemId);
           item.updatedAt = Date.now();
 
           await saveItemToFirebase(item);
+
+          success++;
         } else {
-          item.name = `Предмет #${item.itemId}`;
+          fail++;
         }
       } catch (error) {
-        console.warn('[parse-fail]', item.itemId, wikiUrl, error);
-        item.name = item.name || `Предмет #${item.itemId}`;
+        console.warn('[resolve-error]', item.itemId, error);
+        fail++;
       }
 
-      done++;
-      setStatus(`Парсинг в реальном времени: ${done}/${missing.length}`);
-      render();
+      if ((i + 1) % 5 === 0 || i === missing.length - 1) {
+        setStatus(`Парсинг: ${i + 1}/${missing.length} | найдено: ${success} | без имени: ${fail}`);
+        render();
+      }
 
-      await delay(40);
+      await delay(35);
     }
 
-    setStatus(`Синхронизация завершена. Предметов: ${state.items.length}`);
+    setStatus(`Готово. Найдено: ${success}, без имени: ${fail}, всего: ${state.items.length}`);
     render();
   } finally {
     state.parseRunning = false;
   }
 }
 
-async function fetchItemNameFromWiki(wikiUrl) {
-  const response = await fetch(wikiUrl);
+async function resolveNameForItem(item) {
+  const categoryKey = item.category || state.categoryByItemId[item.itemId] || 'misc';
+  const slugCandidates = GROUP_KEY_TO_WIKI_SLUGS[categoryKey] || ['misc'];
+
+  for (const slug of slugCandidates) {
+    for (const lang of ['ru', 'en']) {
+      const url = `https://wiki.majestic-rp.ru/${lang}/items/${slug}/${item.itemId}`;
+
+      try {
+        const name = await fetchNameFromItemPage(url);
+
+        if (name) {
+          console.log('[resolve-success]', item.itemId, slug, lang, name);
+          item.category = categoryKey;
+          return name;
+        }
+      } catch (error) {
+        console.log('[resolve-try-fail]', item.itemId, slug, lang, error.message);
+      }
+    }
+  }
+
+  return '';
+}
+
+async function fetchNameFromItemPage(url) {
+  const response = await fetch(url);
   if (!response.ok) {
-    throw new Error(`wiki HTTP ${response.status}`);
+    throw new Error(`HTTP ${response.status}`);
   }
 
   const html = await response.text();
@@ -285,11 +304,13 @@ async function saveItemToFirebase(item) {
     category: item.category,
     name: item.name,
     price: normalizePrice(item.price, 1),
-    image: item.image || buildDefaultImage(item.itemId),
     updatedAt: Date.now()
   };
 
-  const response = await fetch(buildDbUrl(`catalog/${item.itemId}`), {
+  const url = buildDbUrl(`catalog/${item.itemId}`);
+  console.log('[firebase-save-try]', url, payload);
+
+  const response = await fetch(url, {
     method: 'PATCH',
     headers: {
       'Content-Type': 'application/json'
@@ -297,9 +318,14 @@ async function saveItemToFirebase(item) {
     body: JSON.stringify(payload)
   });
 
+  console.log('[firebase-save-status]', item.itemId, response.status);
+
   if (!response.ok) {
     throw new Error(`firebase PATCH HTTP ${response.status}`);
   }
+
+  const result = await response.json();
+  console.log('[firebase-save-success]', item.itemId, result);
 }
 
 function delay(ms) {
