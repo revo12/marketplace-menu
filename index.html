@@ -11,8 +11,10 @@
     <div class="window">
       <div class="window__header">
         <div class="window__title">Marketplace Menu</div>
-        <div class="window__search">
-          <input id="searchInput" type="text" placeholder="Поиск по названию..." />
+
+        <div class="window__actions">
+          <input id="searchInput" class="search-input" type="text" placeholder="Поиск по названию или ID..." />
+          <button id="refreshButton" class="action-button">Обновить</button>
         </div>
       </div>
 
@@ -22,6 +24,8 @@
       </div>
 
       <div class="content">
+        <div id="statusBar" class="status-bar">Загрузка каталога...</div>
+
         <div id="favoritesView" class="view view--active">
           <div id="favoritesGrid" class="items-grid"></div>
           <div id="favoritesEmpty" class="empty-state">В избраном пока нет предметов</div>
@@ -29,7 +33,7 @@
 
         <div id="libraryView" class="view">
           <div id="libraryGrid" class="items-grid"></div>
-          <div id="libraryEmpty" class="empty-state">Список предметов пуст</div>
+          <div id="libraryEmpty" class="empty-state">Каталог пуст</div>
         </div>
       </div>
     </div>
