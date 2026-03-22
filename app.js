@@ -86,7 +86,7 @@ function normalizeCatalog(raw) {
       const item = raw[key] || {};
       const itemId = Number(item.itemId ?? key);
       const name = item.name ? String(item.name) : `Item ${itemId}`;
-      const price = item.price ?? '';
+      const price = item.price ?? 1;
       const image = item.image || buildDefaultImage(itemId);
       const updatedAt = item.updatedAt ?? 0;
 
