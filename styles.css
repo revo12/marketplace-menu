@@ -208,6 +208,7 @@ body {
   max-width: 84px;
   max-height: 84px;
   object-fit: contain;
+  display: block;
 }
 
 .item-card__body {
