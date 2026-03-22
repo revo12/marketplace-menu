@@ -1,4 +1,5 @@
 const FIREBASE_DB_URL = 'https://mar-7-default-rtdb.europe-west1.firebasedatabase.app';
+const GLIST_URL = 'https://gist.githubusercontent.com/revo12/2a9c956f1d3ff3c9af769dc5d532e339/raw/8dd5c3ef679092216bb3b9ddfab2926dc6bd2e85/itemid';
 const FAVORITES_STORAGE_KEY = 'marketplace_menu_favorites';
 
 const state = {
@@ -28,7 +29,7 @@ init();
 
 async function init() {
   bindEvents();
-  await loadCatalog();
+  await loadAllData();
   render();
 }
 
@@ -47,7 +48,7 @@ function bindEvents() {
   });
 
   els.refreshButton.addEventListener('click', async () => {
-    await loadCatalog();
+    await loadAllData();
     render();
   });
 }
@@ -59,47 +60,107 @@ function buildDbUrl(path) {
     : `${FIREBASE_DB_URL}/.json`;
 }
 
-async function loadCatalog() {
-  setStatus('Загрузка каталога...');
+async function loadAllData() {
+  setStatus('Загрузка glist...');
+  const glist = await loadGlist();
 
+  setStatus('Загрузка данных Firebase...');
+  const firebaseCatalog = await loadFirebaseCatalog();
+
+  state.items = mergeCatalog(glist, firebaseCatalog);
+  setStatus(`Загружено предметов: ${state.items.length}`);
+}
+
+async function loadGlist() {
+  const response = await fetch(GLIST_URL);
+  if (!response.ok) {
+    throw new Error(`glist HTTP ${response.status}`);
+  }
+
+  const raw = await response.json();
+  return normalizeGlist(raw);
+}
+
+async function loadFirebaseCatalog() {
   try {
     const response = await fetch(buildDbUrl('catalog'));
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
+      return {};
     }
 
     const raw = await response.json();
-    state.items = normalizeCatalog(raw);
-    setStatus(`Загружено предметов: ${state.items.length}`);
+    return raw || {};
   } catch (error) {
-    console.error('Failed to load catalog:', error);
-    state.items = [];
-    setStatus(`Ошибка загрузки каталога: ${error.message}`);
+    console.warn('Firebase catalog unavailable:', error);
+    return {};
   }
 }
 
-function normalizeCatalog(raw) {
-  if (!raw || typeof raw !== 'object') return [];
+function normalizeGlist(raw) {
+  const result = new Map();
 
-  return Object.keys(raw)
-    .map((key) => {
-      const item = raw[key] || {};
-      const itemId = Number(item.itemId ?? key);
-      const name = item.name ? String(item.name) : `Item ${itemId}`;
-      const price = item.price ?? 1;
-      const image = item.image || buildDefaultImage(itemId);
-      const updatedAt = item.updatedAt ?? 0;
+  Object.keys(raw || {}).forEach((groupName) => {
+    const ids = Array.isArray(raw[groupName]) ? raw[groupName] : [];
 
-      return {
-        itemId,
-        name,
-        price,
-        image,
-        updatedAt
-      };
-    })
-    .filter((item) => !Number.isNaN(item.itemId))
-    .sort((a, b) => a.itemId - b.itemId);
+    ids.forEach((itemId) => {
+      const id = Number(itemId);
+      if (Number.isNaN(id)) return;
+
+      if (!result.has(id)) {
+        result.set(id, {
+          itemId: id,
+          name: `Предмет #${id}`,
+          price: 1,
+          image: buildDefaultImage(id),
+          updatedAt: 0
+        });
+      }
+    });
+  });
+
+  return Array.from(result.values()).sort((a, b) => a.itemId - b.itemId);
+}
+
+function mergeCatalog(baseItems, firebaseCatalog) {
+  const map = new Map();
+
+  baseItems.forEach((item) => {
+    map.set(item.itemId, { ...item });
+  });
+
+  Object.keys(firebaseCatalog || {}).forEach((key) => {
+    const row = firebaseCatalog[key] || {};
+    const itemId = Number(row.itemId ?? key);
+
+    if (Number.isNaN(itemId)) return;
+
+    const existing = map.get(itemId) || {
+      itemId,
+      name: `Предмет #${itemId}`,
+      price: 1,
+      image: buildDefaultImage(itemId),
+      updatedAt: 0
+    };
+
+    map.set(itemId, {
+      itemId,
+      name: row.name ? String(row.name) : existing.name,
+      price: normalizePrice(row.price, existing.price),
+      image: row.image || existing.image,
+      updatedAt: Number(row.updatedAt || existing.updatedAt || 0)
+    });
+  });
+
+  return Array.from(map.values()).sort((a, b) => a.itemId - b.itemId);
+}
+
+function normalizePrice(price, fallback = 1) {
+  if (price === '' || price === null || price === undefined) {
+    return fallback;
+  }
+
+  const num = Number(price);
+  return Number.isNaN(num) ? fallback : num;
 }
 
 function buildDefaultImage(itemId) {
@@ -216,11 +277,8 @@ function renderGrid(container, items) {
 }
 
 function formatPrice(price) {
-  if (price === '' || price === null || price === undefined) return '';
-
   const num = Number(price);
-  if (Number.isNaN(num)) return String(price);
-
+  if (Number.isNaN(num)) return '1$';
   return `${num.toLocaleString('ru-RU')}$`;
 }
 
