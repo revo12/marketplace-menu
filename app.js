@@ -1,4 +1,4 @@
-const FIREBASE_DB_URL = 'https://mar-7-default-rtdb.europe-west1.firebasedatabase.app';
+const FIREBASE_DB_URL = 'https://mar-73-default-rtdb.europe-west1.firebasedatabase.app';
 const GLIST_URL = 'https://gist.githubusercontent.com/revo12/2a9c956f1d3ff3c9af769dc5d532e339/raw/8dd5c3ef679092216bb3b9ddfab2926dc6bd2e85/itemid';
 const FAVORITES_STORAGE_KEY = 'marketplace_menu_favorites';
 
