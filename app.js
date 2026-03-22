@@ -188,7 +188,7 @@ function mergeCatalog(baseItems, firebaseCatalog) {
 
 async function fillMissingInfo() {
   const missing = state.items.filter(
-    (item) => !item.name || !item.category || item.price === null || item.price === undefined
+    (item) => !item.name || item.name.trim() === ''
   );
 
   if (!missing.length) {
@@ -196,7 +196,7 @@ async function fillMissingInfo() {
     return;
   }
 
-  setStatus(`Не хватает данных по ${missing.length} предметам. Начинаю парсинг...`);
+  setStatus(`Не хватает названий для ${missing.length} предметов. Начинаю парсинг...`);
 
   for (let i = 0; i < missing.length; i++) {
     const item = missing[i];
@@ -205,6 +205,8 @@ async function fillMissingInfo() {
       const categoryKey = item.category || state.categoryByItemId[item.itemId] || 'misc';
       const wikiSlug = GROUP_KEY_TO_WIKI_SLUG[categoryKey] || 'misc';
       const wikiUrl = `https://wiki.majestic-rp.ru/ru/items/${wikiSlug}/${item.itemId}`;
+
+      console.log('[wiki-try]', item.itemId, categoryKey, wikiUrl);
 
       const resolvedName = await fetchWikiItemName(wikiUrl);
 
@@ -215,16 +217,19 @@ async function fillMissingInfo() {
         item.image = item.image || buildDefaultImage(item.itemId);
         item.updatedAt = Date.now();
 
+        console.log('[wiki-success]', item.itemId, resolvedName);
+
         await saveItemToFirebase(item);
       } else {
-        item.name = item.name || `Предмет #${item.itemId}`;
+        console.log('[wiki-empty]', item.itemId, wikiUrl);
+        item.name = `Предмет #${item.itemId}`;
       }
     } catch (error) {
-      console.warn('Failed to resolve item:', item.itemId, error);
+      console.warn('[wiki-fail]', item.itemId, error);
       item.name = item.name || `Предмет #${item.itemId}`;
     }
 
-    if (i % 6 === 0 || i === missing.length - 1) {
+    if (i % 5 === 0 || i === missing.length - 1) {
       setStatus(`Парсинг и сохранение: ${i + 1}/${missing.length}`);
       render();
     }
@@ -295,6 +300,8 @@ async function saveItemToFirebase(item) {
     updatedAt: Date.now()
   };
 
+  console.log('[firebase-save-try]', item.itemId, payload);
+
   const response = await fetch(buildDbUrl(`catalog/${item.itemId}`), {
     method: 'PATCH',
     headers: {
@@ -306,6 +313,9 @@ async function saveItemToFirebase(item) {
   if (!response.ok) {
     throw new Error(`firebase PATCH HTTP ${response.status}`);
   }
+
+  const result = await response.json();
+  console.log('[firebase-save-success]', item.itemId, result);
 }
 
 function normalizeText(value) {
