@@ -42,15 +42,19 @@ function bindEvents() {
     });
   });
 
-  els.searchInput.addEventListener('input', (e) => {
-    state.search = e.target.value.trim().toLowerCase();
-    render();
-  });
+  if (els.searchInput) {
+    els.searchInput.addEventListener('input', (e) => {
+      state.search = e.target.value.trim().toLowerCase();
+      render();
+    });
+  }
 
-  els.refreshButton.addEventListener('click', async () => {
-    await loadAllData();
-    render();
-  });
+  if (els.refreshButton) {
+    els.refreshButton.addEventListener('click', async () => {
+      await loadAllData();
+      render();
+    });
+  }
 }
 
 function buildDbUrl(path) {
@@ -168,7 +172,9 @@ function buildDefaultImage(itemId) {
 }
 
 function setStatus(text) {
-  els.statusBar.textContent = text;
+  if (els.statusBar) {
+    els.statusBar.textContent = text;
+  }
 }
 
 function updateTabs() {
@@ -176,8 +182,13 @@ function updateTabs() {
     tab.classList.toggle('tab--active', tab.dataset.tab === state.activeTab);
   });
 
-  els.favoritesView.classList.toggle('view--active', state.activeTab === 'favorites');
-  els.libraryView.classList.toggle('view--active', state.activeTab === 'library');
+  if (els.favoritesView) {
+    els.favoritesView.classList.toggle('view--active', state.activeTab === 'favorites');
+  }
+
+  if (els.libraryView) {
+    els.libraryView.classList.toggle('view--active', state.activeTab === 'library');
+  }
 }
 
 function loadFavorites() {
@@ -210,9 +221,11 @@ function toggleFavorite(itemId) {
 }
 
 function getFilteredItems() {
+  const searchValue = state.search || '';
+
   const bySearch = state.items.filter((item) => {
-    const searchByName = item.name.toLowerCase().includes(state.search);
-    const searchById = String(item.itemId).includes(state.search);
+    const searchByName = item.name.toLowerCase().includes(searchValue);
+    const searchById = String(item.itemId).includes(searchValue);
     return searchByName || searchById;
   });
 
@@ -230,14 +243,20 @@ function render() {
 
   if (state.activeTab === 'favorites') {
     renderGrid(els.favoritesGrid, items);
-    els.favoritesEmpty.style.display = items.length ? 'none' : 'block';
+    if (els.favoritesEmpty) {
+      els.favoritesEmpty.style.display = items.length ? 'none' : 'block';
+    }
   } else {
     renderGrid(els.libraryGrid, items);
-    els.libraryEmpty.style.display = items.length ? 'none' : 'block';
+    if (els.libraryEmpty) {
+      els.libraryEmpty.style.display = items.length ? 'none' : 'block';
+    }
   }
 }
 
 function renderGrid(container, items) {
+  if (!container) return;
+
   container.innerHTML = items.map((item) => {
     const active = state.favorites.has(item.itemId);
 
