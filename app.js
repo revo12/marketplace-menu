@@ -305,12 +305,12 @@ async function loadSingleItemFromSupabase(itemId) {
 }
 
 async function resolveNameForItem(item) {
-  log('PARSE', 'Вызов Edge Function resolve-item-name', {
+  log('PARSE', 'Вызов Edge Function rapid-function', {
     itemId: item.itemId,
     category: item.category
   });
 
-  const { data, error } = await supabase.functions.invoke('resolve-item-name', {
+  const { data, error } = await supabase.functions.invoke('rapid-function', {
     body: {
       itemId: item.itemId,
       category: item.category
