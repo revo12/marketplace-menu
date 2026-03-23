@@ -27,6 +27,10 @@ textarea {
   user-select: text;
 }
 
+button {
+  font-family: inherit;
+}
+
 .app {
   width: 1260px;
   height: 760px;
@@ -95,6 +99,10 @@ textarea {
   font-size: 13px;
 }
 
+.search-input::placeholder {
+  color: rgba(255, 255, 255, 0.38);
+}
+
 .toolbar-actions {
   display: flex;
   align-items: center;
@@ -110,6 +118,9 @@ textarea {
   color: #fff;
   cursor: pointer;
   position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .icon-button:hover {
