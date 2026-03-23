@@ -35,28 +35,31 @@ const state = {
   search: '',
   items: [],
   favorites: new Set(loadFavorites()),
+  parseRunning: false,
   categoryByItemId: {},
-  parseRunning: false
+  logs: []
 };
 
 const els = {
   tabs: Array.from(document.querySelectorAll('.tab')),
   searchInput: document.getElementById('searchInput'),
   refreshButton: document.getElementById('refreshButton'),
+  clearLogsButton: document.getElementById('clearLogsButton'),
   statusBar: document.getElementById('statusBar'),
   favoritesView: document.getElementById('favoritesView'),
   libraryView: document.getElementById('libraryView'),
   favoritesGrid: document.getElementById('favoritesGrid'),
   libraryGrid: document.getElementById('libraryGrid'),
   favoritesEmpty: document.getElementById('favoritesEmpty'),
-  libraryEmpty: document.getElementById('libraryEmpty')
+  libraryEmpty: document.getElementById('libraryEmpty'),
+  logsPanel: document.getElementById('logsPanel')
 };
 
 init();
 
 async function init() {
   bindEvents();
-  await reloadAll();
+  await fullRestart();
 }
 
 function bindEvents() {
@@ -77,35 +80,89 @@ function bindEvents() {
 
   if (els.refreshButton) {
     els.refreshButton.addEventListener('click', async () => {
-      await reloadAll();
+      await fullRestart();
+    });
+  }
+
+  if (els.clearLogsButton) {
+    els.clearLogsButton.addEventListener('click', () => {
+      state.logs = [];
+      renderLogs();
+      log('UI', 'Логи очищены');
     });
   }
 }
 
-async function reloadAll() {
-  setStatus('Загрузка glist...');
-  const glistItems = await loadGlistItems();
-
-  setStatus('Чтение Supabase...');
-  const dbItems = await loadSupabaseItems();
-
-  state.items = mergeItems(glistItems, dbItems);
-
+async function fullRestart() {
+  state.items = [];
+  state.categoryByItemId = {};
+  setStatus('Старт...');
   render();
-  setStatus(`Список загружен. Предметов: ${state.items.length}`);
-
-  await parseMissingNames();
+  log('BOOT', 'Начало полной перезагрузки');
+  await progressiveBuildFromGlist();
 }
 
-async function loadGlistItems() {
-  const response = await fetch(GLIST_URL);
-  if (!response.ok) {
-    throw new Error(`glist HTTP ${response.status}`);
+async function progressiveBuildFromGlist() {
+  if (state.parseRunning) {
+    log('BOOT', 'Парсинг уже запущен, пропуск');
+    return;
   }
 
-  const raw = await response.json();
+  state.parseRunning = true;
+
+  try {
+    setStatus('Загрузка glist...');
+    log('GLIST', 'Запрос glist', { url: GLIST_URL });
+
+    const response = await fetch(GLIST_URL);
+    log('GLIST', 'Ответ glist', { status: response.status, ok: response.ok });
+
+    if (!response.ok) {
+      throw new Error(`glist HTTP ${response.status}`);
+    }
+
+    const raw = await response.json();
+    const queue = normalizeGlistToQueue(raw);
+
+    log('GLIST', 'glist разобран', { total: queue.length });
+    setStatus(`glist загружен. Элементов: ${queue.length}. Начинаю поэтапное создание...`);
+
+    for (let i = 0; i < queue.length; i++) {
+      const baseItem = queue[i];
+
+      createOrReplaceLocalItem(baseItem);
+      render();
+
+      log('ITEM', 'Создан базовый блок', {
+        itemId: baseItem.itemId,
+        category: baseItem.category,
+        index: i + 1,
+        total: queue.length
+      });
+
+      await enrichSingleItem(baseItem.itemId, i + 1, queue.length);
+
+      if ((i + 1) % 5 === 0 || i === queue.length - 1) {
+        setStatus(`Обработка: ${i + 1}/${queue.length}`);
+        render();
+      }
+
+      await delay(40);
+    }
+
+    setStatus(`Готово. Создано предметов: ${state.items.length}`);
+    log('BOOT', 'Полная обработка завершена', { total: state.items.length });
+  } catch (error) {
+    setStatus(`Ошибка: ${error.message}`);
+    logError('BOOT', 'Сбой полной перезагрузки', error);
+  } finally {
+    state.parseRunning = false;
+    render();
+  }
+}
+
+function normalizeGlistToQueue(raw) {
   const map = new Map();
-  const categoryByItemId = {};
 
   Object.keys(raw || {}).forEach((groupName) => {
     const ids = Array.isArray(raw[groupName]) ? raw[groupName] : [];
@@ -114,7 +171,7 @@ async function loadGlistItems() {
       const id = Number(itemId);
       if (Number.isNaN(id)) return;
 
-      categoryByItemId[id] = groupName;
+      state.categoryByItemId[id] = groupName;
 
       if (!map.has(id)) {
         map.set(id, {
@@ -123,124 +180,121 @@ async function loadGlistItems() {
           name: '',
           price: 1,
           image: buildDefaultImage(id),
-          updatedAt: 0
+          updatedAt: 0,
+          statusText: 'Создан базовый блок',
+          parseError: ''
         });
       }
     });
   });
 
-  state.categoryByItemId = categoryByItemId;
   return Array.from(map.values()).sort((a, b) => a.itemId - b.itemId);
 }
 
-async function loadSupabaseItems() {
-  const { data, error } = await supabase
-    .from('items_catalog')
-    .select('item_id, category, name, price, updated_at')
-    .order('item_id', { ascending: true });
+function createOrReplaceLocalItem(baseItem) {
+  const existingIndex = state.items.findIndex((x) => x.itemId === baseItem.itemId);
 
-  if (error) {
-    console.warn('[supabase-read-fail]', error);
-    return [];
+  if (existingIndex === -1) {
+    state.items.push(baseItem);
+  } else {
+    state.items[existingIndex] = {
+      ...state.items[existingIndex],
+      ...baseItem
+    };
   }
 
-  return data || [];
+  state.items.sort((a, b) => a.itemId - b.itemId);
 }
 
-function mergeItems(glistItems, dbItems) {
-  const map = new Map();
-
-  glistItems.forEach((item) => {
-    map.set(item.itemId, { ...item });
-  });
-
-  dbItems.forEach((row) => {
-    const itemId = Number(row.item_id);
-    if (Number.isNaN(itemId)) return;
-
-    const existing = map.get(itemId) || {
-      itemId,
-      category: row.category || state.categoryByItemId[itemId] || 'misc',
-      name: '',
-      price: 1,
-      image: buildDefaultImage(itemId),
-      updatedAt: 0
-    };
-
-    map.set(itemId, {
-      itemId,
-      category: row.category || existing.category,
-      name: row.name ? String(row.name) : existing.name,
-      price: normalizePrice(row.price, existing.price),
-      image: existing.image,
-      updatedAt: row.updated_at ? new Date(row.updated_at).getTime() : existing.updatedAt
-    });
-  });
-
-  return Array.from(map.values()).sort((a, b) => a.itemId - b.itemId);
-}
-
-async function parseMissingNames() {
-  if (state.parseRunning) return;
-  state.parseRunning = true;
+async function enrichSingleItem(itemId, current, total) {
+  const item = state.items.find((x) => x.itemId === itemId);
+  if (!item) return;
 
   try {
-    const queue = state.items.filter((item) => !item.name || !item.name.trim());
+    item.statusText = 'Проверка базы...';
+    render();
+    log('DB', 'Проверка записи в Supabase', { itemId });
 
-    if (!queue.length) {
-      setStatus(`База заполнена. Предметов: ${state.items.length}`);
+    const dbRow = await loadSingleItemFromSupabase(itemId);
+
+    if (dbRow) {
+      log('DB', 'Запись найдена в Supabase', { itemId, row: dbRow });
+
+      item.category = dbRow.category || item.category;
+      item.name = dbRow.name || item.name;
+      item.price = normalizePrice(dbRow.price, 1);
+      item.updatedAt = dbRow.updated_at ? new Date(dbRow.updated_at).getTime() : item.updatedAt;
+      item.statusText = 'Загружено из базы';
+      item.parseError = '';
+
+      render();
       return;
     }
 
-    let success = 0;
-    let fail = 0;
-    let writeFail = 0;
+    log('DB', 'Запись не найдена в Supabase', { itemId });
 
-    setStatus(`Начинаю парсинг: ${queue.length} предметов`);
+    item.statusText = 'Парсинг названия...';
+    render();
 
-    for (let i = 0; i < queue.length; i++) {
-      const item = queue[i];
+    const resolvedName = await resolveNameForItem(item);
 
-      try {
-        const resolvedName = await resolveNameForItem(item);
-
-        if (resolvedName) {
-          item.name = resolvedName;
-          item.price = normalizePrice(item.price, 1);
-          item.updatedAt = Date.now();
-
-          try {
-            await saveItemToSupabase(item);
-            success++;
-          } catch (e) {
-            console.warn('[supabase-write-fail]', item.itemId, e);
-            writeFail++;
-          }
-        } else {
-          fail++;
-        }
-      } catch (error) {
-        console.warn('[resolve-error]', item.itemId, error);
-        fail++;
-      }
-
-      if ((i + 1) % 5 === 0 || i === queue.length - 1) {
-        setStatus(
-          `Парсинг: ${i + 1}/${queue.length} | найдено: ${success} | без имени: ${fail} | ошибки записи: ${writeFail}`
-        );
-        render();
-      }
-
-      await delay(50);
+    if (!resolvedName) {
+      item.name = '';
+      item.statusText = 'Имя не найдено';
+      item.parseError = 'Не удалось спарсить название';
+      log('PARSE', 'Название не найдено', {
+        itemId,
+        category: item.category,
+        current,
+        total
+      });
+      render();
+      return;
     }
 
-    setStatus(
-      `Готово. Найдено: ${success}, без имени: ${fail}, ошибки записи: ${writeFail}, всего: ${state.items.length}`
-    );
+    item.name = resolvedName;
+    item.price = normalizePrice(item.price, 1);
+    item.updatedAt = Date.now();
+    item.statusText = 'Имя найдено, сохранение...';
+    item.parseError = '';
     render();
-  } finally {
-    state.parseRunning = false;
+
+    log('PARSE', 'Название спарсено', {
+      itemId,
+      name: resolvedName,
+      category: item.category
+    });
+
+    await saveItemToSupabase(item);
+
+    item.statusText = 'Сохранено в базе';
+    render();
+
+    log('DB', 'Запись сохранена в Supabase', {
+      itemId,
+      name: item.name,
+      category: item.category
+    });
+  } catch (error) {
+    item.statusText = 'Ошибка';
+    item.parseError = error.message;
+    render();
+    logError('ITEM', `Ошибка обработки itemId=${itemId}`, error);
   }
+}
+
+async function loadSingleItemFromSupabase(itemId) {
+  const { data, error } = await supabase
+    .from('items_catalog')
+    .select('item_id, category, name, price, updated_at')
+    .eq('item_id', itemId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Supabase read error: ${error.message}`);
+  }
+
+  return data;
 }
 
 async function resolveNameForItem(item) {
@@ -250,16 +304,33 @@ async function resolveNameForItem(item) {
   for (const slug of slugCandidates) {
     for (const lang of ['ru', 'en']) {
       const url = `https://wiki.majestic-rp.ru/${lang}/items/${slug}/${item.itemId}`;
+      log('PARSE', 'Пробую URL', {
+        itemId: item.itemId,
+        category: categoryKey,
+        slug,
+        lang,
+        url
+      });
 
       try {
         const name = await fetchNameFromItemPage(url);
 
         if (name) {
           item.category = categoryKey;
+          log('PARSE', 'Успешный парсинг по URL', {
+            itemId: item.itemId,
+            url,
+            name
+          });
           return name;
         }
+
+        log('PARSE', 'Пустой результат по URL', {
+          itemId: item.itemId,
+          url
+        });
       } catch (error) {
-        // quietly continue
+        logError('PARSE', `Ошибка запроса URL для itemId=${item.itemId}`, error, { url });
       }
     }
   }
@@ -269,8 +340,9 @@ async function resolveNameForItem(item) {
 
 async function fetchNameFromItemPage(url) {
   const response = await fetch(url);
+
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
+    throw new Error(`Wiki HTTP ${response.status}`);
   }
 
   const html = await response.text();
@@ -310,12 +382,14 @@ async function saveItemToSupabase(item) {
     updated_at: new Date().toISOString()
   };
 
+  log('DB', 'Upsert в Supabase', { payload });
+
   const { error } = await supabase
     .from('items_catalog')
     .upsert(payload, { onConflict: 'item_id' });
 
   if (error) {
-    throw error;
+    throw new Error(`Supabase write error: ${error.message}`);
   }
 }
 
@@ -347,8 +421,8 @@ function buildPlaceholderImage(itemId) {
   const svg = `
     <svg xmlns="http://www.w3.org/2000/svg" width="96" height="96">
       <rect width="100%" height="100%" rx="12" ry="12" fill="#1d2430"/>
-      <text x="50%" y="48%" text-anchor="middle" dominant-baseline="middle" fill="#8fa3c7" font-family="Arial" font-size="13">Нет фото</text>
-      <text x="50%" y="68%" text-anchor="middle" dominant-baseline="middle" fill="#6e7f9f" font-family="Arial" font-size="12">#${itemId}</text>
+      <text x="50%" y="46%" text-anchor="middle" dominant-baseline="middle" fill="#8fa3c7" font-family="Arial" font-size="13">Нет фото</text>
+      <text x="50%" y="66%" text-anchor="middle" dominant-baseline="middle" fill="#6e7f9f" font-family="Arial" font-size="12">#${itemId}</text>
     </svg>
   `;
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
@@ -434,6 +508,8 @@ function render() {
       els.libraryEmpty.style.display = items.length ? 'none' : 'block';
     }
   }
+
+  renderLogs();
 }
 
 function renderGrid(container, items) {
@@ -441,12 +517,14 @@ function renderGrid(container, items) {
 
   container.innerHTML = items.map((item) => {
     const active = state.favorites.has(item.itemId);
-    const itemName = item.name || `Предмет #${item.itemId}`;
+    const itemName = item.name || (item.parseError ? `Ошибка #${item.itemId}` : `Предмет #${item.itemId}`);
     const fallbackImage = buildPlaceholderImage(item.itemId);
+    const priceText = formatPrice(item.price);
+    const titleText = item.parseError ? `${itemName} — ${item.parseError}` : itemName;
 
     return `
-      <div class="item-card">
-        <div class="item-card__price">${escapeHtml(formatPrice(item.price))}</div>
+      <div class="item-card" title="${escapeHtml(titleText)}">
+        <div class="item-card__price">${escapeHtml(priceText)}</div>
 
         <button
           class="item-card__favorite ${active ? 'item-card__favorite--active' : ''}"
@@ -479,6 +557,42 @@ function renderGrid(container, items) {
   });
 }
 
+function renderLogs() {
+  if (!els.logsPanel) return;
+
+  const logs = state.logs.slice(-250).reverse();
+
+  els.logsPanel.innerHTML = logs.map((entry) => {
+    return `
+      <div class="log-entry ${entry.error ? 'log-entry--error' : ''}">
+        <div class="log-entry__top">
+          <div class="log-entry__stage">${escapeHtml(entry.stage)}</div>
+          <div class="log-entry__time">${escapeHtml(formatLogTime(entry.time))}</div>
+        </div>
+        <div class="log-entry__message">${escapeHtml(entry.message)}</div>
+        ${entry.data ? `<div class="log-entry__data">${escapeHtml(stringifyLogData(entry.data))}</div>` : ''}
+        ${entry.error ? `<div class="log-entry__error">${escapeHtml(entry.error)}</div>` : ''}
+      </div>
+    `;
+  }).join('');
+}
+
+function stringifyLogData(data) {
+  try {
+    return JSON.stringify(data, null, 2);
+  } catch {
+    return String(data);
+  }
+}
+
+function formatLogTime(iso) {
+  try {
+    return new Date(iso).toLocaleTimeString('ru-RU');
+  } catch {
+    return iso;
+  }
+}
+
 function formatPrice(price) {
   const num = Number(price);
   if (Number.isNaN(num)) return '1$';
@@ -492,4 +606,39 @@ function escapeHtml(value) {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#039;');
+}
+
+function log(stage, message, data = null) {
+  const entry = {
+    time: new Date().toISOString(),
+    stage,
+    message,
+    data
+  };
+
+  state.logs.push(entry);
+  if (state.logs.length > 500) {
+    state.logs.shift();
+  }
+
+  console.log(`[${stage}] ${message}`, data ?? '');
+  renderLogs();
+}
+
+function logError(stage, message, error, data = null) {
+  const entry = {
+    time: new Date().toISOString(),
+    stage,
+    message,
+    error: error?.message || String(error),
+    data
+  };
+
+  state.logs.push(entry);
+  if (state.logs.length > 500) {
+    state.logs.shift();
+  }
+
+  console.error(`[${stage}] ${message}`, error, data ?? '');
+  renderLogs();
 }
