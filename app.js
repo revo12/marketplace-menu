@@ -186,7 +186,9 @@ function normalizeGlistToQueue(raw) {
           image: buildDefaultImage(id),
           updatedAt: 0,
           statusText: 'Создан базовый блок',
-          parseError: ''
+          parseError: '',
+          debugReason: '',
+          debugAttempts: []
         });
       }
     });
@@ -217,6 +219,8 @@ async function enrichSingleItem(itemId, current, total) {
   try {
     item.statusText = 'Проверка базы...';
     item.parseError = '';
+    item.debugReason = '';
+    item.debugAttempts = [];
     render();
 
     log('DB', 'Проверка записи в Supabase', { itemId });
@@ -232,6 +236,8 @@ async function enrichSingleItem(itemId, current, total) {
       item.updatedAt = dbRow.updated_at ? new Date(dbRow.updated_at).getTime() : item.updatedAt;
       item.statusText = 'Загружено из базы';
       item.parseError = '';
+      item.debugReason = '';
+      item.debugAttempts = [];
 
       render();
       return;
@@ -253,7 +259,8 @@ async function enrichSingleItem(itemId, current, total) {
         category: item.category,
         current,
         total,
-        reason: item.parseError
+        reason: item.parseError,
+        attempts: item.debugAttempts.slice(0, 5)
       });
       render();
       return;
@@ -323,11 +330,19 @@ async function resolveNameForItem(item) {
 
   log('PARSE', 'Ответ Edge Function', data);
 
+  item.debugReason = data?.reason || '';
+  item.debugAttempts = Array.isArray(data?.attempts) ? data.attempts : [];
+
   if (data?.ok && data?.name) {
     return data.name;
   }
 
-  item.parseError = data?.reason || 'Edge Function returned no name';
+  if (data?.reason) {
+    item.parseError = data.reason;
+  } else {
+    item.parseError = 'Edge Function returned no name';
+  }
+
   return '';
 }
 
@@ -487,11 +502,23 @@ function renderGrid(container, items) {
     const itemName = item.name || `Предмет #${item.itemId}`;
     const fallbackImage = buildPlaceholderImage(item.itemId);
     const priceText = formatPrice(item.price);
-    const titleText = item.parseError ? `${itemName} — ${item.parseError}` : itemName;
-    const errorText = item.parseError ? item.parseError : '';
+
+    const shortReason = item.parseError
+      ? item.parseError.slice(0, 80)
+      : '';
+
+    const titleParts = [
+      itemName,
+      item.statusText || '',
+      item.parseError || '',
+      item.debugReason || '',
+      item.debugAttempts?.length ? `attempts=${item.debugAttempts.length}` : ''
+    ].filter(Boolean);
+
+    const cardTitle = titleParts.join(' | ');
 
     return `
-      <div class="item-card" title="${escapeHtml(titleText)}">
+      <div class="item-card" title="${escapeHtml(cardTitle)}">
         <div class="item-card__price">${escapeHtml(priceText)}</div>
 
         <button
@@ -512,7 +539,7 @@ function renderGrid(container, items) {
 
         <div class="item-card__body">
           <div class="item-card__name">${escapeHtml(itemName)}</div>
-          ${errorText ? `<div class="item-card__error">${escapeHtml(errorText)}</div>` : ''}
+          ${shortReason ? `<div class="item-card__error">${escapeHtml(shortReason)}</div>` : ''}
         </div>
       </div>
     `;
