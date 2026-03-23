@@ -371,13 +371,6 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function normalizeText(value) {
-  return String(value || '')
-    .replace(/\s+/g, ' ')
-    .replace(/\u00A0/g, ' ')
-    .trim();
-}
-
 function normalizePrice(price, fallback = 1) {
   if (price === '' || price === null || price === undefined) {
     return fallback;
