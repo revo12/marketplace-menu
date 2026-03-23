@@ -5,6 +5,12 @@ const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_gOmRcvLoj3VBaraUnRcBhw_frmRiGl6
 
 const GLIST_URL = 'https://gist.githubusercontent.com/revo12/2a9c956f1d3ff3c9af769dc5d532e339/raw/8dd5c3ef679092216bb3b9ddfab2926dc6bd2e85/itemid';
 const FAVORITES_STORAGE_KEY = 'marketplace_menu_favorites';
+const FUNCTION_NAME = 'rapid-function';
+
+const BUILD_VERSION = 'menu4';
+const READ_BATCH_SIZE = 50;
+const PARSE_CONCURRENCY = 3;
+const LOG_LIMIT = 500;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
 
@@ -12,10 +18,19 @@ const state = {
   activeTab: 'favorites',
   search: '',
   items: [],
+  itemsMap: new Map(),
   favorites: new Set(loadFavorites()),
   parseRunning: false,
   categoryByItemId: {},
-  logs: []
+  logs: [],
+  stats: {
+    total: 0,
+    processed: 0,
+    fromDb: 0,
+    parsed: 0,
+    saved: 0,
+    errors: 0
+  }
 };
 
 const els = {
@@ -73,14 +88,23 @@ function bindEvents() {
 
 async function fullRestart() {
   state.items = [];
+  state.itemsMap = new Map();
   state.categoryByItemId = {};
+  state.stats = {
+    total: 0,
+    processed: 0,
+    fromDb: 0,
+    parsed: 0,
+    saved: 0,
+    errors: 0
+  };
+
   setStatus('Старт...');
   render();
-
-  log('BOOT', 'Начало полной перезагрузки');
+  log('BOOT', 'Начало полной перезагрузки', { version: BUILD_VERSION });
 
   await testSupabaseRead();
-  await progressiveBuildFromGlist();
+  await buildFromGlist();
 }
 
 async function testSupabaseRead() {
@@ -97,16 +121,13 @@ async function testSupabaseRead() {
       return;
     }
 
-    log('DB', 'Тестовое чтение Supabase успешно', {
-      rows: data?.length || 0,
-      data
-    });
+    log('DB', 'Тестовое чтение Supabase успешно', { rows: data?.length || 0 });
   } catch (error) {
     logError('DB', 'Критическая ошибка тестового чтения Supabase', error);
   }
 }
 
-async function progressiveBuildFromGlist() {
+async function buildFromGlist() {
   if (state.parseRunning) {
     log('BOOT', 'Парсинг уже запущен, пропуск');
     return;
@@ -128,34 +149,29 @@ async function progressiveBuildFromGlist() {
     const raw = await response.json();
     const queue = normalizeGlistToQueue(raw);
 
+    state.stats.total = queue.length;
+
+    queue.forEach((item) => addOrUpdateItem(item));
+    render();
+
     log('GLIST', 'glist разобран', { total: queue.length });
-    setStatus(`glist загружен. Элементов: ${queue.length}. Начинаю поэтапное создание...`);
+    setStatus(`glist загружен. Элементов: ${queue.length}. Загрузка данных из базы...`);
 
-    for (let i = 0; i < queue.length; i++) {
-      const baseItem = queue[i];
+    const dbMap = await preloadSupabaseRows(queue.map((x) => x.itemId));
+    hydrateFromDb(dbMap);
 
-      createOrReplaceLocalItem(baseItem);
-      render();
+    render();
+    setStatus(`База подгружена. Начинаю парсинг отсутствующих названий...`);
 
-      log('ITEM', 'Создан базовый блок', {
-        itemId: baseItem.itemId,
-        category: baseItem.category,
-        index: i + 1,
-        total: queue.length
-      });
+    const parseQueue = state.items.filter((item) => !item.name || !item.name.trim());
+    await processWithConcurrency(parseQueue, PARSE_CONCURRENCY, async (item) => {
+      await enrichSingleItem(item.itemId);
+    });
 
-      await enrichSingleItem(baseItem.itemId, i + 1, queue.length);
-
-      if ((i + 1) % 5 === 0 || i === queue.length - 1) {
-        setStatus(`Обработка: ${i + 1}/${queue.length}`);
-        render();
-      }
-
-      await delay(40);
-    }
-
-    setStatus(`Готово. Создано предметов: ${state.items.length}`);
-    log('BOOT', 'Полная обработка завершена', { total: state.items.length });
+    setStatus(
+      `Готово. Всего: ${state.stats.total} | из базы: ${state.stats.fromDb} | спарсено: ${state.stats.parsed} | сохранено: ${state.stats.saved} | ошибок: ${state.stats.errors}`
+    );
+    log('BOOT', 'Полная обработка завершена', { stats: state.stats });
   } catch (error) {
     setStatus(`Ошибка: ${error.message}`);
     logError('BOOT', 'Сбой полной перезагрузки', error);
@@ -197,56 +213,66 @@ function normalizeGlistToQueue(raw) {
   return Array.from(map.values()).sort((a, b) => a.itemId - b.itemId);
 }
 
-function createOrReplaceLocalItem(baseItem) {
-  const existingIndex = state.items.findIndex((x) => x.itemId === baseItem.itemId);
+async function preloadSupabaseRows(itemIds) {
+  const result = new Map();
 
-  if (existingIndex === -1) {
-    state.items.push(baseItem);
-  } else {
-    state.items[existingIndex] = {
-      ...state.items[existingIndex],
-      ...baseItem
-    };
+  for (let i = 0; i < itemIds.length; i += READ_BATCH_SIZE) {
+    const batchIds = itemIds.slice(i, i + READ_BATCH_SIZE);
+    log('DB', 'Чтение батча из Supabase', {
+      batchStart: i,
+      batchSize: batchIds.length
+    });
+
+    const { data, error } = await supabase
+      .from('items_catalog')
+      .select('item_id, category, name, price, updated_at')
+      .in('item_id', batchIds);
+
+    if (error) {
+      logError('DB', 'Ошибка чтения батча Supabase', error, { batchIds });
+      continue;
+    }
+
+    for (const row of data || []) {
+      result.set(Number(row.item_id), row);
+    }
   }
 
-  state.items.sort((a, b) => a.itemId - b.itemId);
+  return result;
 }
 
-async function enrichSingleItem(itemId, current, total) {
-  const item = state.items.find((x) => x.itemId === itemId);
-  if (!item) return;
+function hydrateFromDb(dbMap) {
+  for (const item of state.items) {
+    const row = dbMap.get(item.itemId);
+    if (!row) continue;
 
-  try {
-    item.statusText = 'Проверка базы...';
+    item.category = row.category || item.category;
+    item.name = row.name || item.name;
+    item.price = normalizePrice(row.price, 1);
+    item.updatedAt = row.updated_at ? new Date(row.updated_at).getTime() : item.updatedAt;
+    item.statusText = 'Загружено из базы';
     item.parseError = '';
     item.debugReason = '';
     item.debugAttempts = [];
-    render();
 
-    log('DB', 'Проверка записи в Supabase', { itemId });
+    state.stats.fromDb++;
+  }
 
-    const dbRow = await loadSingleItemFromSupabase(itemId);
+  log('DB', 'Гидратация из базы завершена', {
+    fromDb: state.stats.fromDb
+  });
+}
 
-    if (dbRow) {
-      log('DB', 'Запись найдена в Supabase', { itemId, row: dbRow });
+async function enrichSingleItem(itemId) {
+  const item = state.itemsMap.get(itemId);
+  if (!item) return;
 
-      item.category = dbRow.category || item.category;
-      item.name = dbRow.name || item.name;
-      item.price = normalizePrice(dbRow.price, 1);
-      item.updatedAt = dbRow.updated_at ? new Date(dbRow.updated_at).getTime() : item.updatedAt;
-      item.statusText = 'Загружено из базы';
-      item.parseError = '';
-      item.debugReason = '';
-      item.debugAttempts = [];
-
-      render();
-      return;
-    }
-
-    log('DB', 'Запись не найдена в Supabase', { itemId });
-
-    item.statusText = 'Вызов Edge Function...';
-    render();
+  try {
+    item.statusText = 'Парсинг...';
+    item.parseError = '';
+    item.debugReason = '';
+    item.debugAttempts = [];
+    renderLight();
 
     const resolvedName = await resolveNameForItem(item);
 
@@ -254,61 +280,34 @@ async function enrichSingleItem(itemId, current, total) {
       item.name = '';
       item.statusText = 'Имя не найдено';
       item.parseError = item.parseError || 'Edge Function не вернула название';
-      log('PARSE', 'Название не найдено', {
-        itemId,
-        category: item.category,
-        current,
-        total,
-        reason: item.parseError,
-        attempts: item.debugAttempts.slice(0, 5)
-      });
-      render();
+      state.stats.errors++;
+      state.stats.processed++;
+      renderLight();
       return;
     }
 
     item.name = resolvedName;
     item.price = normalizePrice(item.price, 1);
     item.updatedAt = Date.now();
-    item.statusText = 'Имя найдено, сохранение...';
+    item.statusText = 'Сохранение...';
     item.parseError = '';
-    render();
-
-    log('PARSE', 'Название получено', {
-      itemId,
-      name: resolvedName,
-      category: item.category
-    });
+    state.stats.parsed++;
+    renderLight();
 
     await saveItemToSupabase(item);
 
     item.statusText = 'Сохранено в базе';
-    render();
-
-    log('DB', 'Запись сохранена в Supabase', {
-      itemId,
-      name: item.name,
-      category: item.category
-    });
+    state.stats.saved++;
+    state.stats.processed++;
+    renderLight();
   } catch (error) {
     item.statusText = 'Ошибка';
     item.parseError = error.message;
-    render();
+    state.stats.errors++;
+    state.stats.processed++;
+    renderLight();
     logError('ITEM', `Ошибка обработки itemId=${itemId}`, error);
   }
-}
-
-async function loadSingleItemFromSupabase(itemId) {
-  const { data, error } = await supabase
-    .from('items_catalog')
-    .select('item_id, category, name, price, updated_at')
-    .eq('item_id', itemId)
-    .maybeSingle();
-
-  if (error) {
-    throw new Error(formatSupabaseError('Supabase read error', error));
-  }
-
-  return data;
 }
 
 async function resolveNameForItem(item) {
@@ -317,7 +316,7 @@ async function resolveNameForItem(item) {
     category: item.category
   });
 
-  const { data, error } = await supabase.functions.invoke('rapid-function', {
+  const { data, error } = await supabase.functions.invoke(FUNCTION_NAME, {
     body: {
       itemId: item.itemId,
       category: item.category
@@ -328,7 +327,14 @@ async function resolveNameForItem(item) {
     throw new Error(`Edge Function invoke error: ${error.message}`);
   }
 
-  log('PARSE', 'Ответ Edge Function', data);
+  log('PARSE', 'Ответ Edge Function', {
+    itemId: item.itemId,
+    ok: data?.ok,
+    reason: data?.reason,
+    attemptsCount: data?.attemptsCount,
+    name: data?.name,
+    usedUrl: data?.usedUrl
+  });
 
   item.debugReason = data?.reason || '';
   item.debugAttempts = Array.isArray(data?.attempts) ? data.attempts : [];
@@ -366,8 +372,49 @@ async function saveItemToSupabase(item) {
     throw new Error(formatSupabaseError('Supabase write error', error));
   }
 
-  log('DB', 'Ответ Supabase после upsert', { data });
+  log('DB', 'Ответ Supabase после upsert', {
+    itemId: item.itemId,
+    rows: data?.length || 0
+  });
+
   return data;
+}
+
+function addOrUpdateItem(item) {
+  const existing = state.itemsMap.get(item.itemId);
+
+  if (existing) {
+    Object.assign(existing, item);
+  } else {
+    state.items.push(item);
+    state.itemsMap.set(item.itemId, item);
+  }
+
+  state.items.sort((a, b) => a.itemId - b.itemId);
+}
+
+async function processWithConcurrency(items, limit, worker) {
+  let index = 0;
+
+  async function runOne() {
+    while (index < items.length) {
+      const currentIndex = index++;
+      const item = items[currentIndex];
+
+      setStatus(
+        `Обработка: ${Math.min(state.stats.processed + state.stats.fromDb + 1, state.stats.total)}/${state.stats.total}`
+      );
+
+      await worker(item);
+    }
+  }
+
+  const runners = [];
+  for (let i = 0; i < limit; i++) {
+    runners.push(runOne());
+  }
+
+  await Promise.all(runners);
 }
 
 function formatSupabaseError(prefix, error) {
@@ -494,6 +541,17 @@ function render() {
   renderLogs();
 }
 
+let lightRenderQueued = false;
+function renderLight() {
+  if (lightRenderQueued) return;
+  lightRenderQueued = true;
+
+  requestAnimationFrame(() => {
+    lightRenderQueued = false;
+    render();
+  });
+}
+
 function renderGrid(container, items) {
   if (!container) return;
 
@@ -503,9 +561,7 @@ function renderGrid(container, items) {
     const fallbackImage = buildPlaceholderImage(item.itemId);
     const priceText = formatPrice(item.price);
 
-    const shortReason = item.parseError
-      ? item.parseError.slice(0, 80)
-      : '';
+    const shortReason = item.parseError ? item.parseError.slice(0, 80) : '';
 
     const titleParts = [
       itemName,
@@ -539,6 +595,7 @@ function renderGrid(container, items) {
 
         <div class="item-card__body">
           <div class="item-card__name">${escapeHtml(itemName)}</div>
+          <div class="item-card__meta">${escapeHtml(item.statusText || '')}</div>
           ${shortReason ? `<div class="item-card__error">${escapeHtml(shortReason)}</div>` : ''}
         </div>
       </div>
@@ -613,7 +670,7 @@ function log(stage, message, data = null) {
   };
 
   state.logs.push(entry);
-  if (state.logs.length > 500) {
+  if (state.logs.length > LOG_LIMIT) {
     state.logs.shift();
   }
 
@@ -631,7 +688,7 @@ function logError(stage, message, error, data = null) {
   };
 
   state.logs.push(entry);
-  if (state.logs.length > 500) {
+  if (state.logs.length > LOG_LIMIT) {
     state.logs.shift();
   }
 
