@@ -1,6 +1,12 @@
-const FIREBASE_DB_URL = 'https://mar-73-default-rtdb.europe-west1.firebasedatabase.app';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
+const SUPABASE_URL = 'https://juqibbkgfcefroggwbjb.supabase.co';
+const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_gOmRcvLoj3VBaraUnRcBhw_frmRiGl6';
+
 const GLIST_URL = 'https://gist.githubusercontent.com/revo12/2a9c956f1d3ff3c9af769dc5d532e339/raw/8dd5c3ef679092216bb3b9ddfab2926dc6bd2e85/itemid';
 const FAVORITES_STORAGE_KEY = 'marketplace_menu_favorites';
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
 
 const GROUP_KEY_TO_WIKI_SLUGS = {
   food: ['food'],
@@ -80,22 +86,15 @@ async function reloadAll() {
   setStatus('Загрузка glist...');
   const glistItems = await loadGlistItems();
 
-  setStatus('Чтение Firebase...');
-  const firebaseCatalog = await loadFirebaseCatalog();
+  setStatus('Чтение Supabase...');
+  const dbItems = await loadSupabaseItems();
 
-  state.items = mergeItems(glistItems, firebaseCatalog);
+  state.items = mergeItems(glistItems, dbItems);
 
   render();
   setStatus(`Список загружен. Предметов: ${state.items.length}`);
 
   await parseMissingNames();
-}
-
-function buildDbUrl(path) {
-  const cleanPath = String(path || '').replace(/^\/+|\/+$/g, '');
-  return cleanPath
-    ? `${FIREBASE_DB_URL}/${cleanPath}.json`
-    : `${FIREBASE_DB_URL}/.json`;
 }
 
 async function loadGlistItems() {
@@ -134,28 +133,29 @@ async function loadGlistItems() {
   return Array.from(map.values()).sort((a, b) => a.itemId - b.itemId);
 }
 
-async function loadFirebaseCatalog() {
-  try {
-    const response = await fetch(buildDbUrl('catalog'));
-    if (!response.ok) return {};
-    const raw = await response.json();
-    return raw || {};
-  } catch (error) {
-    console.warn('[firebase-read-fail]', error);
-    return {};
+async function loadSupabaseItems() {
+  const { data, error } = await supabase
+    .from('items_catalog')
+    .select('item_id, category, name, price, updated_at')
+    .order('item_id', { ascending: true });
+
+  if (error) {
+    console.warn('[supabase-read-fail]', error);
+    return [];
   }
+
+  return data || [];
 }
 
-function mergeItems(glistItems, firebaseCatalog) {
+function mergeItems(glistItems, dbItems) {
   const map = new Map();
 
   glistItems.forEach((item) => {
     map.set(item.itemId, { ...item });
   });
 
-  Object.keys(firebaseCatalog || {}).forEach((key) => {
-    const row = firebaseCatalog[key] || {};
-    const itemId = Number(row.itemId ?? key);
+  dbItems.forEach((row) => {
+    const itemId = Number(row.item_id);
     if (Number.isNaN(itemId)) return;
 
     const existing = map.get(itemId) || {
@@ -173,7 +173,7 @@ function mergeItems(glistItems, firebaseCatalog) {
       name: row.name ? String(row.name) : existing.name,
       price: normalizePrice(row.price, existing.price),
       image: existing.image,
-      updatedAt: Number(row.updatedAt || existing.updatedAt || 0)
+      updatedAt: row.updated_at ? new Date(row.updated_at).getTime() : existing.updatedAt
     });
   });
 
@@ -188,14 +188,13 @@ async function parseMissingNames() {
     const queue = state.items.filter((item) => !item.name || !item.name.trim());
 
     if (!queue.length) {
-      setStatus(`Firebase заполнен. Предметов: ${state.items.length}`);
+      setStatus(`База заполнена. Предметов: ${state.items.length}`);
       return;
     }
 
     let success = 0;
     let fail = 0;
     let writeFail = 0;
-    let batch = [];
 
     setStatus(`Начинаю парсинг: ${queue.length} предметов`);
 
@@ -210,18 +209,12 @@ async function parseMissingNames() {
           item.price = normalizePrice(item.price, 1);
           item.updatedAt = Date.now();
 
-          batch.push(makeFirebasePayload(item));
-          success++;
-
-          if (batch.length >= 20) {
-            try {
-              await saveBatchToFirebase(batch);
-              batch = [];
-            } catch (e) {
-              console.warn('[firebase-batch-fail]', e);
-              writeFail += batch.length;
-              batch = [];
-            }
+          try {
+            await saveItemToSupabase(item);
+            success++;
+          } catch (e) {
+            console.warn('[supabase-write-fail]', item.itemId, e);
+            writeFail++;
           }
         } else {
           fail++;
@@ -238,16 +231,7 @@ async function parseMissingNames() {
         render();
       }
 
-      await delay(60);
-    }
-
-    if (batch.length) {
-      try {
-        await saveBatchToFirebase(batch);
-      } catch (e) {
-        console.warn('[firebase-final-batch-fail]', e);
-        writeFail += batch.length;
-      }
+      await delay(50);
     }
 
     setStatus(
@@ -257,52 +241,6 @@ async function parseMissingNames() {
   } finally {
     state.parseRunning = false;
   }
-}
-
-function makeFirebasePayload(item) {
-  return {
-    itemId: item.itemId,
-    category: item.category,
-    name: item.name,
-    price: normalizePrice(item.price, 1),
-    updatedAt: Date.now()
-  };
-}
-
-async function saveBatchToFirebase(items) {
-  const payload = {};
-
-  for (const item of items) {
-    payload[item.itemId] = item;
-  }
-
-  let lastError = null;
-
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      const response = await fetch(buildDbUrl('catalog'), {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(payload)
-      });
-
-      if (!response.ok) {
-        throw new Error(`firebase batch PATCH HTTP ${response.status}`);
-      }
-
-      const result = await response.json();
-      console.log('[firebase-batch-success]', Object.keys(payload).length, result);
-      return result;
-    } catch (error) {
-      lastError = error;
-      console.warn('[firebase-batch-retry]', attempt, error.message);
-      await delay(400 * attempt);
-    }
-  }
-
-  throw lastError;
 }
 
 async function resolveNameForItem(item) {
@@ -321,7 +259,7 @@ async function resolveNameForItem(item) {
           return name;
         }
       } catch (error) {
-        // пробуем следующий URL
+        // quietly continue
       }
     }
   }
@@ -361,6 +299,24 @@ async function fetchNameFromItemPage(url) {
   }
 
   return '';
+}
+
+async function saveItemToSupabase(item) {
+  const payload = {
+    item_id: item.itemId,
+    category: item.category,
+    name: item.name,
+    price: normalizePrice(item.price, 1),
+    updated_at: new Date().toISOString()
+  };
+
+  const { error } = await supabase
+    .from('items_catalog')
+    .upsert(payload, { onConflict: 'item_id' });
+
+  if (error) {
+    throw error;
+  }
 }
 
 function delay(ms) {
