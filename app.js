@@ -7,10 +7,8 @@ const GLIST_URL = 'https://gist.githubusercontent.com/revo12/2a9c956f1d3ff3c9af7
 const FAVORITES_STORAGE_KEY = 'marketplace_menu_favorites';
 const FUNCTION_NAME = 'rapid-function';
 
-const BUILD_VERSION = 'menu4';
 const READ_BATCH_SIZE = 50;
 const PARSE_CONCURRENCY = 3;
-const LOG_LIMIT = 500;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
 
@@ -22,7 +20,6 @@ const state = {
   favorites: new Set(loadFavorites()),
   parseRunning: false,
   categoryByItemId: {},
-  logs: [],
   stats: {
     total: 0,
     processed: 0,
@@ -37,15 +34,13 @@ const els = {
   tabs: Array.from(document.querySelectorAll('.tab')),
   searchInput: document.getElementById('searchInput'),
   refreshButton: document.getElementById('refreshButton'),
-  clearLogsButton: document.getElementById('clearLogsButton'),
   statusBar: document.getElementById('statusBar'),
   favoritesView: document.getElementById('favoritesView'),
   libraryView: document.getElementById('libraryView'),
   favoritesGrid: document.getElementById('favoritesGrid'),
   libraryGrid: document.getElementById('libraryGrid'),
   favoritesEmpty: document.getElementById('favoritesEmpty'),
-  libraryEmpty: document.getElementById('libraryEmpty'),
-  logsPanel: document.getElementById('logsPanel')
+  libraryEmpty: document.getElementById('libraryEmpty')
 };
 
 init();
@@ -76,14 +71,6 @@ function bindEvents() {
       await fullRestart();
     });
   }
-
-  if (els.clearLogsButton) {
-    els.clearLogsButton.addEventListener('click', () => {
-      state.logs = [];
-      renderLogs();
-      log('UI', 'Логи очищены');
-    });
-  }
 }
 
 async function fullRestart() {
@@ -99,48 +86,19 @@ async function fullRestart() {
     errors: 0
   };
 
-  setStatus('Старт...');
+  setStatus('Загрузка...');
   render();
-  log('BOOT', 'Начало полной перезагрузки', { version: BUILD_VERSION });
 
-  await testSupabaseRead();
   await buildFromGlist();
 }
 
-async function testSupabaseRead() {
-  try {
-    log('DB', 'Проверка доступа к таблице items_catalog');
-
-    const { data, error } = await supabase
-      .from('items_catalog')
-      .select('item_id, category, name, price, updated_at')
-      .limit(1);
-
-    if (error) {
-      logError('DB', 'Ошибка тестового чтения Supabase', error);
-      return;
-    }
-
-    log('DB', 'Тестовое чтение Supabase успешно', { rows: data?.length || 0 });
-  } catch (error) {
-    logError('DB', 'Критическая ошибка тестового чтения Supabase', error);
-  }
-}
-
 async function buildFromGlist() {
-  if (state.parseRunning) {
-    log('BOOT', 'Парсинг уже запущен, пропуск');
-    return;
-  }
-
+  if (state.parseRunning) return;
   state.parseRunning = true;
 
   try {
     setStatus('Загрузка glist...');
-    log('GLIST', 'Запрос glist', { url: GLIST_URL });
-
     const response = await fetch(GLIST_URL);
-    log('GLIST', 'Ответ glist', { status: response.status, ok: response.ok });
 
     if (!response.ok) {
       throw new Error(`glist HTTP ${response.status}`);
@@ -154,14 +112,13 @@ async function buildFromGlist() {
     queue.forEach((item) => addOrUpdateItem(item));
     render();
 
-    log('GLIST', 'glist разобран', { total: queue.length });
-    setStatus(`glist загружен. Элементов: ${queue.length}. Загрузка данных из базы...`);
+    setStatus(`glist загружен. Элементов: ${queue.length}. Загрузка базы...`);
 
     const dbMap = await preloadSupabaseRows(queue.map((x) => x.itemId));
     hydrateFromDb(dbMap);
 
     render();
-    setStatus(`База подгружена. Начинаю парсинг отсутствующих названий...`);
+    setStatus(`База подгружена. Поиск отсутствующих названий...`);
 
     const parseQueue = state.items.filter((item) => !item.name || !item.name.trim());
     await processWithConcurrency(parseQueue, PARSE_CONCURRENCY, async (item) => {
@@ -171,10 +128,8 @@ async function buildFromGlist() {
     setStatus(
       `Готово. Всего: ${state.stats.total} | из базы: ${state.stats.fromDb} | спарсено: ${state.stats.parsed} | сохранено: ${state.stats.saved} | ошибок: ${state.stats.errors}`
     );
-    log('BOOT', 'Полная обработка завершена', { stats: state.stats });
   } catch (error) {
     setStatus(`Ошибка: ${error.message}`);
-    logError('BOOT', 'Сбой полной перезагрузки', error);
   } finally {
     state.parseRunning = false;
     render();
@@ -201,10 +156,9 @@ function normalizeGlistToQueue(raw) {
           price: 1,
           image: buildDefaultImage(id),
           updatedAt: 0,
-          statusText: 'Создан базовый блок',
+          statusText: 'Ожидание',
           parseError: '',
-          debugReason: '',
-          debugAttempts: []
+          debugReason: ''
         });
       }
     });
@@ -218,10 +172,6 @@ async function preloadSupabaseRows(itemIds) {
 
   for (let i = 0; i < itemIds.length; i += READ_BATCH_SIZE) {
     const batchIds = itemIds.slice(i, i + READ_BATCH_SIZE);
-    log('DB', 'Чтение батча из Supabase', {
-      batchStart: i,
-      batchSize: batchIds.length
-    });
 
     const { data, error } = await supabase
       .from('items_catalog')
@@ -229,7 +179,6 @@ async function preloadSupabaseRows(itemIds) {
       .in('item_id', batchIds);
 
     if (error) {
-      logError('DB', 'Ошибка чтения батча Supabase', error, { batchIds });
       continue;
     }
 
@@ -250,17 +199,12 @@ function hydrateFromDb(dbMap) {
     item.name = row.name || item.name;
     item.price = normalizePrice(row.price, 1);
     item.updatedAt = row.updated_at ? new Date(row.updated_at).getTime() : item.updatedAt;
-    item.statusText = 'Загружено из базы';
+    item.statusText = 'Из базы';
     item.parseError = '';
     item.debugReason = '';
-    item.debugAttempts = [];
 
     state.stats.fromDb++;
   }
-
-  log('DB', 'Гидратация из базы завершена', {
-    fromDb: state.stats.fromDb
-  });
 }
 
 async function enrichSingleItem(itemId) {
@@ -268,18 +212,17 @@ async function enrichSingleItem(itemId) {
   if (!item) return;
 
   try {
-    item.statusText = 'Парсинг...';
+    item.statusText = 'Парсинг';
     item.parseError = '';
     item.debugReason = '';
-    item.debugAttempts = [];
     renderLight();
 
     const resolvedName = await resolveNameForItem(item);
 
     if (!resolvedName) {
       item.name = '';
-      item.statusText = 'Имя не найдено';
-      item.parseError = item.parseError || 'Edge Function не вернула название';
+      item.statusText = 'Не найдено';
+      item.parseError = item.parseError || 'Название не найдено';
       state.stats.errors++;
       state.stats.processed++;
       renderLight();
@@ -289,14 +232,14 @@ async function enrichSingleItem(itemId) {
     item.name = resolvedName;
     item.price = normalizePrice(item.price, 1);
     item.updatedAt = Date.now();
-    item.statusText = 'Сохранение...';
+    item.statusText = 'Сохранение';
     item.parseError = '';
     state.stats.parsed++;
     renderLight();
 
     await saveItemToSupabase(item);
 
-    item.statusText = 'Сохранено в базе';
+    item.statusText = 'Готово';
     state.stats.saved++;
     state.stats.processed++;
     renderLight();
@@ -306,16 +249,10 @@ async function enrichSingleItem(itemId) {
     state.stats.errors++;
     state.stats.processed++;
     renderLight();
-    logError('ITEM', `Ошибка обработки itemId=${itemId}`, error);
   }
 }
 
 async function resolveNameForItem(item) {
-  log('PARSE', 'Вызов Edge Function rapid-function', {
-    itemId: item.itemId,
-    category: item.category
-  });
-
   const { data, error } = await supabase.functions.invoke(FUNCTION_NAME, {
     body: {
       itemId: item.itemId,
@@ -324,31 +261,16 @@ async function resolveNameForItem(item) {
   });
 
   if (error) {
-    throw new Error(`Edge Function invoke error: ${error.message}`);
+    throw new Error(`Edge Function: ${error.message}`);
   }
 
-  log('PARSE', 'Ответ Edge Function', {
-    itemId: item.itemId,
-    ok: data?.ok,
-    reason: data?.reason,
-    attemptsCount: data?.attemptsCount,
-    name: data?.name,
-    usedUrl: data?.usedUrl
-  });
-
   item.debugReason = data?.reason || '';
-  item.debugAttempts = Array.isArray(data?.attempts) ? data.attempts : [];
 
   if (data?.ok && data?.name) {
     return data.name;
   }
 
-  if (data?.reason) {
-    item.parseError = data.reason;
-  } else {
-    item.parseError = 'Edge Function returned no name';
-  }
-
+  item.parseError = data?.reason || 'Название не найдено';
   return '';
 }
 
@@ -361,23 +283,24 @@ async function saveItemToSupabase(item) {
     updated_at: new Date().toISOString()
   };
 
-  log('DB', 'Upsert в Supabase', { payload });
-
-  const { data, error } = await supabase
+  const { error } = await supabase
     .from('items_catalog')
-    .upsert([payload], { onConflict: 'item_id' })
-    .select();
+    .upsert([payload], { onConflict: 'item_id' });
 
   if (error) {
-    throw new Error(formatSupabaseError('Supabase write error', error));
+    throw new Error(formatSupabaseError(error));
   }
+}
 
-  log('DB', 'Ответ Supabase после upsert', {
-    itemId: item.itemId,
-    rows: data?.length || 0
-  });
+function formatSupabaseError(error) {
+  const parts = [
+    error?.message || '',
+    error?.details || '',
+    error?.hint || '',
+    error?.code || ''
+  ].filter(Boolean);
 
-  return data;
+  return parts.join(' | ');
 }
 
 function addOrUpdateItem(item) {
@@ -415,22 +338,6 @@ async function processWithConcurrency(items, limit, worker) {
   }
 
   await Promise.all(runners);
-}
-
-function formatSupabaseError(prefix, error) {
-  const parts = [
-    prefix,
-    error?.message ? `message=${error.message}` : '',
-    error?.details ? `details=${error.details}` : '',
-    error?.hint ? `hint=${error.hint}` : '',
-    error?.code ? `code=${error.code}` : ''
-  ].filter(Boolean);
-
-  return parts.join(' | ');
-}
-
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function normalizePrice(price, fallback = 1) {
@@ -537,8 +444,6 @@ function render() {
       els.libraryEmpty.style.display = items.length ? 'none' : 'block';
     }
   }
-
-  renderLogs();
 }
 
 let lightRenderQueued = false;
@@ -567,8 +472,7 @@ function renderGrid(container, items) {
       itemName,
       item.statusText || '',
       item.parseError || '',
-      item.debugReason || '',
-      item.debugAttempts?.length ? `attempts=${item.debugAttempts.length}` : ''
+      item.debugReason || ''
     ].filter(Boolean);
 
     const cardTitle = titleParts.join(' | ');
@@ -610,42 +514,6 @@ function renderGrid(container, items) {
   });
 }
 
-function renderLogs() {
-  if (!els.logsPanel) return;
-
-  const logs = state.logs.slice(-250).reverse();
-
-  els.logsPanel.innerHTML = logs.map((entry) => {
-    return `
-      <div class="log-entry ${entry.error ? 'log-entry--error' : ''}">
-        <div class="log-entry__top">
-          <div class="log-entry__stage">${escapeHtml(entry.stage)}</div>
-          <div class="log-entry__time">${escapeHtml(formatLogTime(entry.time))}</div>
-        </div>
-        <div class="log-entry__message">${escapeHtml(entry.message)}</div>
-        ${entry.data ? `<div class="log-entry__data">${escapeHtml(stringifyLogData(entry.data))}</div>` : ''}
-        ${entry.error ? `<div class="log-entry__error">${escapeHtml(entry.error)}</div>` : ''}
-      </div>
-    `;
-  }).join('');
-}
-
-function stringifyLogData(data) {
-  try {
-    return JSON.stringify(data, null, 2);
-  } catch {
-    return String(data);
-  }
-}
-
-function formatLogTime(iso) {
-  try {
-    return new Date(iso).toLocaleTimeString('ru-RU');
-  } catch {
-    return iso;
-  }
-}
-
 function formatPrice(price) {
   const num = Number(price);
   if (Number.isNaN(num)) return '1$';
@@ -659,39 +527,4 @@ function escapeHtml(value) {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#039;');
-}
-
-function log(stage, message, data = null) {
-  const entry = {
-    time: new Date().toISOString(),
-    stage,
-    message,
-    data
-  };
-
-  state.logs.push(entry);
-  if (state.logs.length > LOG_LIMIT) {
-    state.logs.shift();
-  }
-
-  console.log(`[${stage}] ${message}`, data ?? '');
-  renderLogs();
-}
-
-function logError(stage, message, error, data = null) {
-  const entry = {
-    time: new Date().toISOString(),
-    stage,
-    message,
-    error: error?.message || String(error),
-    data
-  };
-
-  state.logs.push(entry);
-  if (state.logs.length > LOG_LIMIT) {
-    state.logs.shift();
-  }
-
-  console.error(`[${stage}] ${message}`, error, data ?? '');
-  renderLogs();
 }
